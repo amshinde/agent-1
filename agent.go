@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kata-containers/agent/pkg/uevent"
 	pb "github.com/kata-containers/agent/protocols/grpc"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/configs"
@@ -48,12 +50,13 @@ type process struct {
 type container struct {
 	sync.RWMutex
 
-	id          string
-	initProcess *process
-	container   libcontainer.Container
-	config      configs.Config
-	processes   map[string]*process
-	mounts      []string
+	id           string
+	initProcess  *process
+	container    libcontainer.Container
+	config       configs.Config
+	processes    map[string]*process
+	mounts       []string
+	bindMountDev bool
 }
 
 type sandbox struct {
@@ -475,6 +478,96 @@ func (s *sandbox) teardown() error {
 	return s.channel.teardown()
 }
 
+// Add kernel subsystems that need to be blacklisted here.
+// These devices will not be mounted within a container.
+var blacklistedDeviceSubsystems = []string{}
+
+const blockSubsystem = "block"
+
+func isBlacklistedSubsystem(subsystem string) bool {
+	for _, s := range blacklistedDeviceSubsystems {
+		if subsystem == s {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *sandbox) listenToUdevEvents() {
+	uEvHandler, err := uevent.NewHandler()
+	if err != nil {
+		return
+	}
+	defer uEvHandler.Close()
+
+	fieldLogger := agentLog.WithField("subsystem", "udevlistener")
+
+	go func() {
+		for {
+			uEv, err := uEvHandler.Read()
+			if err != nil {
+				fieldLogger.Error(err)
+				continue
+			}
+
+			fieldLogger = fieldLogger.WithFields(logrus.Fields{
+				"uevent-action":    uEv.Action,
+				"uevent-devpath":   uEv.DevPath,
+				"uevent-subsystem": uEv.SubSystem,
+				"uevent-seqnum":    uEv.SeqNum,
+			})
+
+			fieldLogger.Info("Got uevent")
+
+			if uEv.SubSystem == blockSubsystem {
+				continue
+			}
+
+			if isBlacklistedSubsystem(uEv.SubSystem) {
+				fieldLogger.WithFields(logrus.Fields{
+					"udev-subsystem":  uEv.SubSystem,
+					"udev-devicenode": uEv.DevPath,
+				}).Info("Device has been blacklisted")
+
+				continue
+			}
+
+			if uEv.Action == "add" {
+				// Bind device to /dev within all containers
+				s.bindDeviceNode(uEv.DevPath)
+			}
+		}
+	}()
+}
+
+func (s *sandbox) bindDeviceNode(devNode string) {
+	fieldLogger := agentLog.WithField("subsystem", "udevlistener")
+	for _, ctr := range s.containers {
+		fieldLogger.WithFields(logrus.Fields{
+			"devNode": devNode,
+			"ctr":     ctr.container.ID(),
+		}).Info("Bind mounting device to /dev")
+
+		if ctr.bindMountDev {
+			if err := ctr.bindDeviceNode(devNode); err != nil {
+				fieldLogger.WithError(err).Info("Could not bind device")
+			}
+		}
+	}
+}
+
+func (c *container) bindDeviceNode(devNode string) error {
+	dest := filepath.Join(c.config.Rootfs, devNode)
+
+	mount(devNode, dest, "bind", syscall.MS_BIND, "")
+	// c.deviceNodesLock.Lock()
+	//c.deviceNodes = append(c.deviceNodes, dest)
+	//c.deviceNodesLock.Unlock()
+
+	return nil
+}
+
 type initMount struct {
 	fstype, src, dest string
 	options           []string
@@ -607,9 +700,17 @@ func main() {
 		return
 	}
 
+	// Create done signal channel for signalling udev epoll loop.
+	done := make(chan struct{})
+
+	// Run loop listening for udev events
+	//s.listenToUdevEvents()
+
 	s.wg.Wait()
 
 	// Tear down properly.
+	close(done)
+
 	if err = s.teardown(); err != nil {
 		return
 	}

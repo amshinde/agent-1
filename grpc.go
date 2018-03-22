@@ -409,11 +409,70 @@ func (a *agentGRPC) CreateContainer(ctx context.Context, req *pb.CreateContainer
 
 	a.sandbox.setContainer(req.ContainerId, container)
 
+	var index int
+
+	agentLog.WithFields(logrus.Fields{
+		"Mounts": ociSpec.Mounts,
+	}).Info("xxxMounts after deletions")
+
+	// Check if host /dev is bind-mounted (i.e -v /dev:/dev)
+	for i, m := range ociSpec.Mounts {
+		if m.Source == "/dev" && m.Destination == "/dev" && m.Type == "bind" {
+			container.bindMountDev = true
+
+			agentLog.WithFields(logrus.Fields{
+				"containerid": req.ContainerId,
+				"rootfs":      container.config.Rootfs,
+			}).Info("xxxbind mount found for /dev")
+
+			// We dont want to actually expose all the initial devices from outside the VM to the container,
+			// but do this selectively, hence mount on /dev with tmpfs first
+
+			if err := mountDevToRootfs(container.config.Rootfs); err != nil {
+				agentLog.WithFields(logrus.Fields{
+					"containerid": req.ContainerId,
+					"rootfs":      container.config.Rootfs,
+				}).Info("xxxCould not perform bind mount for /dev")
+			}
+
+			index = i
+
+			break
+		}
+	}
+
+	//Delete the /dev mount from the oci Mounts
+	ociSpec.Mounts = append(ociSpec.Mounts[:index], ociSpec.Mounts[index+1:]...)
+	agentLog.WithFields(logrus.Fields{
+		"Mounts": ociSpec.Mounts,
+	}).Info("xxxMounts after deletions")
+
 	if err := a.execProcess(container, container.initProcess, true); err != nil {
 		return emptyResp, err
 	}
 
 	return emptyResp, a.postExecProcess(container, container.initProcess)
+}
+
+func mountDevToRootfs(absoluteRootFs string) error {
+	dest := filepath.Join(absoluteRootFs, "/dev")
+	if _, err := os.Stat(dest); os.IsNotExist(err) {
+		if err := os.Mkdir(dest, 755); err != nil {
+			return err
+		}
+	}
+
+	if err := syscall.Mount("tmpfs", dest, "tmpfs", syscall.MS_NOSUID|syscall.MS_STRICTATIME, ""); err != nil {
+		return fmt.Errorf("Could not mount tmpfs to %v: %v", dest, err)
+	}
+
+	content, _ := ioutil.ReadFile("testdata/hello")
+
+	agentLog.WithFields(logrus.Fields{
+		"content": content,
+	}).Info("xxxContents of /dev after mounting tmpfs")
+
+	return nil
 }
 
 func (a *agentGRPC) StartContainer(ctx context.Context, req *pb.StartContainerRequest) (*gpb.Empty, error) {
