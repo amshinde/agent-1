@@ -415,16 +415,21 @@ func (a *agentGRPC) postExecProcess(ctr *container, proc *process) error {
 // path set by the spec, since we will always ignore it. Indeed, it makes no
 // sense to rely on the namespace path provided by the host since namespaces
 // are different inside the guest.
-func (a *agentGRPC) updateContainerConfigNamespaces(config *configs.Config) error {
+func (a *agentGRPC) updateContainerConfigNamespaces(config *configs.Config, ctr *container) {
 	var pidNs, ipcNs, utsNs bool
 
 	// Update shared PID namespace.
 	for idx, ns := range config.Namespaces {
 		if ns.Type == configs.NEWPID {
-			// In case the path is empty because we don't expect
-			// the containers to share the same PID namespace, a
-			// new PID ns is going to be created.
-			config.Namespaces[idx].Path = a.sandbox.sharedPidNs.path
+			// Use shared pid ns if SandboxPidns has been set in either
+			// the CreateSandbox request or CreateContainer request.
+			// Else set this to empty string so that a new pid namespace is
+			// created for the container.
+			if ctr.useSandboxPidNs || a.sandbox.sandboxPidNs {
+				config.Namespaces[idx].Path = a.sandbox.sharedPidNs.path
+			} else {
+				config.Namespaces[idx].Path = ""
+			}
 			pidNs = true
 		}
 
@@ -442,6 +447,9 @@ func (a *agentGRPC) updateContainerConfigNamespaces(config *configs.Config) erro
 	// If no NEWPID type was found, let's make sure we add it. Otherwise,
 	// the container could end up in the same PID namespace than the agent
 	// and we want to prevent this for security reasons.
+	// The container would then join the shared pid namespace of either the
+	// pause process created by the agent or the pid namespace of the infra
+	// container.
 	if !pidNs {
 		newPidNs := configs.Namespace{
 			Type: configs.NEWPID,
@@ -465,8 +473,6 @@ func (a *agentGRPC) updateContainerConfigNamespaces(config *configs.Config) erro
 		}
 		config.Namespaces = append(config.Namespaces, newUTSNs)
 	}
-
-	return nil
 }
 
 func (a *agentGRPC) updateContainerConfigPrivileges(spec *specs.Spec, config *configs.Config) error {
@@ -482,11 +488,8 @@ func (a *agentGRPC) updateContainerConfigPrivileges(spec *specs.Spec, config *co
 	return nil
 }
 
-func (a *agentGRPC) updateContainerConfig(spec *specs.Spec, config *configs.Config) error {
-	if err := a.updateContainerConfigNamespaces(config); err != nil {
-		return err
-	}
-
+func (a *agentGRPC) updateContainerConfig(spec *specs.Spec, config *configs.Config, ctr *container) error {
+	a.updateContainerConfigNamespaces(config, ctr)
 	return a.updateContainerConfigPrivileges(spec, config)
 }
 
@@ -514,6 +517,11 @@ func (a *agentGRPC) CreateContainer(ctx context.Context, req *pb.CreateContainer
 
 	if _, err = a.sandbox.getContainer(req.ContainerId); err == nil {
 		return emptyResp, grpcStatus.Errorf(codes.AlreadyExists, "Container %s already exists, impossible to create", req.ContainerId)
+	}
+
+	// The very first container will always be the sandbox/infra container.
+	if len(a.sandbox.containers) == 0 {
+		a.sandbox.infraContainerId = req.ContainerId
 	}
 
 	// re-scan PCI bus
@@ -544,9 +552,10 @@ func (a *agentGRPC) CreateContainer(ctx context.Context, req *pb.CreateContainer
 	}
 
 	ctr := &container{
-		id:        req.ContainerId,
-		processes: make(map[string]*process),
-		mounts:    mountList,
+		id:              req.ContainerId,
+		processes:       make(map[string]*process),
+		mounts:          mountList,
+		useSandboxPidNs: req.SandboxPidns,
 	}
 
 	a.sandbox.setContainer(req.ContainerId, ctr)
@@ -578,7 +587,7 @@ func (a *agentGRPC) CreateContainer(ctx context.Context, req *pb.CreateContainer
 
 	// Update libcontainer configuration for specific cases not handled
 	// by the specconv converter.
-	if err = a.updateContainerConfig(ociSpec, config); err != nil {
+	if err = a.updateContainerConfig(ociSpec, config, ctr); err != nil {
 		return emptyResp, err
 	}
 
@@ -601,6 +610,20 @@ func (a *agentGRPC) CreateContainer(ctx context.Context, req *pb.CreateContainer
 
 	if err = a.execProcess(ctr, ctr.initProcess, true); err != nil {
 		return emptyResp, err
+	}
+
+	// Populate the shared pid path only if this is an infra container and the
+	// shared path is empty. This means SandboxPidns has not been
+	// passed in the CreateSandbox request and a separate pause process has not been
+	// created. We treat the first container created as the infra container in that case
+	// and use its pid namespace in case it needs to be shared.
+	if a.sandbox.sharedPidNs.path == "" && a.sandbox.infraContainerId == ctr.id {
+		pid, err := ctr.initProcess.process.Pid()
+		if err != nil {
+			return emptyResp, err
+		}
+
+		a.sandbox.sharedPidNs.path = fmt.Sprintf("/proc/%d/ns/pid", pid)
 	}
 
 	return emptyResp, a.postExecProcess(ctr, ctr.initProcess)
@@ -1058,6 +1081,7 @@ func (a *agentGRPC) CreateSandbox(ctx context.Context, req *pb.CreateSandboxRequ
 	a.sandbox.network.ifaces = make(map[string]*pb.Interface)
 	a.sandbox.network.dns = req.Dns
 	a.sandbox.running = true
+	a.sandbox.sandboxPidNs = req.SandboxPidns
 
 	// Set up shared UTS and IPC namespaces
 	if err := a.sandbox.setupSharedNamespaces(); err != nil {

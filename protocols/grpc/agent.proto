@@ -59,6 +59,7 @@ message CreateContainerRequest {
 	repeated Device devices = 4;
 	repeated Storage storages = 5;
 	Spec OCI = 6;
+	bool sandbox_pidns = 7;
 }
 
 message StartContainerRequest {

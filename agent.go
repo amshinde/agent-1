@@ -53,33 +53,36 @@ type process struct {
 type container struct {
 	sync.RWMutex
 
-	id          string
-	initProcess *process
-	container   libcontainer.Container
-	config      configs.Config
-	processes   map[string]*process
-	mounts      []string
+	id              string
+	initProcess     *process
+	container       libcontainer.Container
+	config          configs.Config
+	processes       map[string]*process
+	mounts          []string
+	useSandboxPidNs bool
 }
 
 type sandbox struct {
 	sync.RWMutex
 
-	id              string
-	running         bool
-	noPivotRoot     bool
-	enableGrpcTrace bool
-	containers      map[string]*container
-	channel         channel
-	network         network
-	wg              sync.WaitGroup
-	sharedPidNs     namespace
-	mounts          []string
-	subreaper       reaper
-	server          *grpc.Server
-	pciDeviceMap    map[string]string
-	deviceWatchers  map[string](chan string)
-	sharedUTSNs     namespace
-	sharedIPCNs     namespace
+	id               string
+	running          bool
+	noPivotRoot      bool
+	enableGrpcTrace  bool
+	containers       map[string]*container
+	channel          channel
+	network          network
+	wg               sync.WaitGroup
+	sandboxPidNs     bool
+	sharedPidNs      namespace
+	mounts           []string
+	subreaper        reaper
+	server           *grpc.Server
+	pciDeviceMap     map[string]string
+	deviceWatchers   map[string](chan string)
+	sharedUTSNs      namespace
+	sharedIPCNs      namespace
+	infraContainerId string
 }
 
 var agentFields = logrus.Fields{
@@ -317,9 +320,9 @@ func (s *sandbox) setupSharedPidNs() error {
 }
 
 func (s *sandbox) teardownSharedPidNs() error {
-	if s.sharedPidNs.path == "" {
+	if !s.sandboxPidNs {
 		// Nothing needs to be done because we are not in a case
-		// where a PID namespace is shared across containers.
+		// where we have created a pause process
 		return nil
 	}
 
