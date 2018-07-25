@@ -247,9 +247,11 @@ func waitForDevice(devicePath, deviceName string, checkUevent checkUeventCb) err
 	fieldLogger := agentLog.WithField("device", deviceName)
 
 	// Check if the device already exists.
-	if _, err := os.Stat(devicePath); err == nil {
-		fieldLogger.Info("Device already hotplugged, quit listening")
-		return nil
+	if devicePath != "" {
+		if _, err := os.Stat(devicePath); err == nil {
+			fieldLogger.Info("Device already hotplugged, quit listening")
+			return nil
+		}
 	}
 
 	fieldLogger.Info("Started listening for uevents for device hotplug")

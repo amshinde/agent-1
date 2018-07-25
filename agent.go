@@ -489,6 +489,8 @@ func (s *sandbox) listenToUdevEvents() {
 			"uevent-devname":   uEv.DevName,
 		})
 
+		fieldLogger.Info("###Received udev event")
+
 		// Check if device hotplug event results in a device node being created.
 		if uEv.DevName != "" && uEv.Action == "add" && strings.HasPrefix(uEv.DevPath, rootBusPath) {
 			// Lock is needed to safey read and modify the pciDeviceMap and deviceWatchers.
