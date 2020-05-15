@@ -111,6 +111,7 @@ type container struct {
 	processes       map[string]*process
 	mounts          []string
 	useSandboxPidNs bool
+	agentPidNs      bool
 	ctx             context.Context
 }
 
@@ -206,6 +207,8 @@ const (
 )
 
 var commCh = unknownCh
+
+var enableAgentPidNs = false
 
 // This is the list of file descriptors we can properly close after the process
 // has been started. When the new process is exec(), those file descriptors are

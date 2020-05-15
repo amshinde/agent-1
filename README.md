@@ -98,6 +98,13 @@ The pipe's capacity for stdout/stderr can be modified by specifying the `agent.c
 to the guest kernel command line. For example, `agent.container_pipe_size=2097152` will set the stdout and stderr
 pipes to 2097152 bytes.
 
+## Agent pid namespace 
+
+The agent will allow a container to share the pid namespace of the agent when `agent.agent_pidns` is true.
+When this flag is true and the grpc container creation request has `agentPidNs` set to true, the container
+share its pid namespace with the agent. This should be used only when strictly required and with caution as 
+the container process can access the agent process.
+
 [1]: https://github.com/firecracker-microvm/firecracker/blob/master/docs/vsock.md
 [2]: https://golang.org/pkg/time/#ParseDuration
 [3]: http://man7.org/linux/man-pages/man7/pipe.7.html

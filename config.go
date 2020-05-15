@@ -29,6 +29,7 @@ const (
 	hotplugTimeoutFlag         = optionPrefix + "hotplug_timeout"
 	unifiedCgroupHierarchyFlag = optionPrefix + "unified_cgroup_hierarchy"
 	containerPipeSizeFlag      = optionPrefix + "container_pipe_size"
+	agentPidNsFlag             = optionPrefix + "agent_pidns"
 	traceModeStatic            = "static"
 	traceModeDynamic           = "dynamic"
 	traceTypeIsolated          = "isolated"
@@ -155,6 +156,15 @@ func parseCmdlineOption(option string) error {
 			return err
 		}
 		unifiedCgroupHierarchy = flag
+	case agentPidNsFlag:
+		flag, err := strconv.ParseBool(split[valuePosition])
+		if err != nil {
+			return err
+		}
+		if flag {
+			agentLog.Debug("Param passed to enable agent pid namespace sharing")
+			enableAgentPidNs = flag
+		}
 	default:
 		if strings.HasPrefix(split[optionPosition], optionPrefix) {
 			return grpcStatus.Errorf(codes.NotFound, "Unknown option %s", split[optionPosition])
@@ -162,7 +172,6 @@ func parseCmdlineOption(option string) error {
 	}
 
 	return nil
-
 }
 
 func enableTracing(traceMode, traceType string) {
